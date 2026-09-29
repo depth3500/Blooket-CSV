@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blooket Answer Key → CSV</title>
+<style>
+:root{--bg:#f6f7fb;--card:#fff;--tx:#1d2233;--mut:#6b7285;--ac:#5b5fef;--ok:#1b9e5a;--warn:#c77800;--bd:#e2e5ef}
+@media(prefers-color-scheme:dark){:root{--bg:#14161f;--card:#1e2130;--tx:#eceef7;--mut:#9aa1b8;--ac:#8b8fff;--ok:#4cd08a;--warn:#f0b040;--bd:#30344a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,sans-serif}
+main{max-width:860px;margin:0 auto;padding:24px 16px 60px}
+h1{font-size:1.6rem;margin:0 0 4px}p.s{color:var(--mut);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:18px;margin-bottom:16px}
+#drop{border:2px dashed var(--bd);border-radius:12px;padding:28px;text-align:center;cursor:pointer;color:var(--mut)}
+#drop.h{border-color:var(--ac);color:var(--ac)}
+button,.btn{background:var(--ac);color:#fff;border:0;border-radius:10px;padding:10px 18px;font:inherit;font-weight:600;cursor:pointer}
+button:disabled{opacity:.4;cursor:default}
+input[type=number]{width:80px;padding:8px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);font:inherit}
+.row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.warn{color:var(--warn);font-size:.9rem;margin:2px 0}.ok{color:var(--ok);font-weight:600}
+.tw{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.88rem}
+th,td{border-bottom:1px solid var(--bd);padding:6px 8px;text-align:left;vertical-align:top}
+td.c{background:rgba(27,158,90,.18);font-weight:600}ol{padding-left:20px;color:var(--mut);font-size:.92rem}
+</style></head><body><main>
+<h1>Blooket Answer Key → CSV</h1>
+<p class="s">Turn a Blooket answer-key PDF into a CSV you can upload with Blooket's CSV Import. Everything runs in your browser; your file is never uploaded anywhere.</p>
+<div class="card"><ol>
+<li>In Blooket, open your set → <b>Print</b>. Turn <b>off</b> shuffling and images, turn <b>on</b> "show answers" (correct choice bolded).</li>
+<li>Save the answer key as a PDF, then drop it below.</li>
+<li>Check the preview, download the CSV, then in Blooket use <b>Create → CSV Import</b>.</li></ol></div>
+<div class="card"><div id="drop">Drop the answer-key PDF here, or click to choose<input id="f" type="file" accept="application/pdf" hidden></div></div>
+<div class="card" id="res" hidden>
+<div class="row"><label>Seconds per question <input id="t" type="number" min="1" max="300" value="20"></label>
+<button id="dl">Download CSV</button><span id="st"></span></div>
+<div id="wn" style="margin-top:10px"></div></div>
+<div class="card" id="pv" hidden><div class="tw"><table><thead><tr><th>#</th><th>Question</th><th>1</th><th>2</th><th>3</th><th>4</th></tr></thead><tbody id="tb"></tbody></table></div>
+<p class="s" style="margin:10px 0 0">Green cells are the answers detected as correct (bold in the PDF).</p></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<script>
+// ---- Core: PDF extraction, parsing, CSV (shared by browser + tests) ----
+const isBoldFont = n => /bold|black|heavy/i.test(n || '') && !/semi|demi|medium/i.test(n || '');
+
+async function extractItems(pdfjsLib, data) {
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+  const items = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    await page.getOperatorList(); // loads fonts so real names are available
+    const tc = await page.getTextContent();
+    const names = {};
+    for (const it of tc.items) {
+      if (!it.str) continue;
+      if (!(it.fontName in names)) {
+        try { names[it.fontName] = page.commonObjs.get(it.fontName).name; } catch (e) { names[it.fontName] = ''; }
+      }
+      items.push({ page: p, str: it.str, x: it.transform[4], y: it.transform[5], w: it.width,
+        size: Math.abs(it.transform[3]), bold: isBoldFont(names[it.fontName]) });
+    }
+  }
+  return items;
+}
+
+function buildSegments(items) {
+  // drop text whose size differs from the body size (titles, headers)
+  const bySize = {};
+  items.forEach(i => { const k = i.size.toFixed(1); bySize[k] = (bySize[k] || 0) + i.str.length; });
+  const body = parseFloat(Object.entries(bySize).sort((a, b) => b[1] - a[1])[0][0]);
+  const kept = items.filter(i => Math.abs(i.size - body) < 1.5);
+  kept.sort((a, b) => a.page - b.page || b.y - a.y || a.x - b.x);
+  // group into lines
+  const lines = [];
+  for (const it of kept) {
+    const L = lines[lines.length - 1];
+    if (L && L.page === it.page && Math.abs(L.y - it.y) < 3) L.items.push(it);
+    else lines.push({ page: it.page, y: it.y, items: [it] });
+  }
+  // split lines into column segments
+  const segs = [];
+  for (const L of lines) {
+    L.items.sort((a, b) => a.x - b.x);
+    let cur = null, prevEnd = -1e9;
+    L.items.forEach((it, idx) => {
+      const nxt = (L.items[idx + 1] || {}).str || '';
+      const marker = (/^[a-dA-D]$/.test(it.str) && /^\)/.test(nxt)) || (/^\d+$/.test(it.str) && /^\./.test(nxt));
+      if (!cur || it.x - prevEnd > 12 || (marker && cur.parts.some(p => p.str.trim() && !/\(\s*$/.test(p.str)))) {
+        cur = { x: it.x, parts: [] }; segs.push(cur);
+      }
+      cur.parts.push(it); prevEnd = it.x + it.w;
+    });
+  }
+  return segs.map(s => ({ x: s.x, text: s.parts.map(p => p.str).join('').replace(/\s+/g, ' ').trim(),
+    boldChars: s.parts.filter(p => p.bold).reduce((n, p) => n + p.str.trim().length, 0),
+    chars: s.parts.reduce((n, p) => n + p.str.trim().length, 0) }));
+}
+
+function parseItems(items) {
+  const segs = buildSegments(items), qs = [], warnings = [];
+  let q = null, c = null;
+  for (const s of segs) {
+    let m;
+    if ((m = s.text.match(/^(\d+)\s*\.\s*(.*)$/)) && (!q || +m[1] === q.num + 1 || q.choices.length >= 2)) {
+      q = { num: +m[1], text: m[2], choices: [] }; qs.push(q); c = null;
+    } else if (!q) continue;
+    else if ((m = s.text.match(/^([a-dA-D])\s*\)\s*(.*)$/))) {
+      c = { letter: m[1].toLowerCase(), text: m[2], x: s.x, bold: s.boldChars, chars: s.chars };
+      q.choices.push(c);
+    } else if (q.choices.length) {
+      const t = q.choices.filter(k => Math.abs(k.x - s.x) < 15).pop() || c;
+      t.text += ' ' + s.text; t.bold += s.boldChars; t.chars += s.chars;
+    } else q.text += ' ' + s.text;
+  }
+  qs.forEach(q => {
+    q.text = q.text.trim();
+    q.choices.forEach(k => { k.text = k.text.trim(); k.correct = k.chars > 0 && k.bold / k.chars > 0.5; });
+    q.correct = q.choices.map((k, i) => k.correct ? i + 1 : 0).filter(Boolean);
+    if (q.choices.length < 2) warnings.push(`Q${q.num}: found only ${q.choices.length} answer choice(s).`);
+    if (q.choices.length > 4) warnings.push(`Q${q.num}: has ${q.choices.length} choices; Blooket allows 4.`);
+    if (!q.correct.length) warnings.push(`Q${q.num}: no bolded (correct) answer detected — fill it in manually.`);
+    if (q.correct.length > 1) warnings.push(`Q${q.num}: ${q.correct.length} answers are bold; all marked correct.`);
+  });
+  return { questions: qs, warnings };
+}
+
+const HEADER = ['Question #', 'Question Text', 'Answer 1', 'Answer 2', 'Answer 3 \n(Optional)',
+  'Answer 4 \n(Optional)', 'Time Limit (sec) \n(Max: 300 Seconds)', 'Correct Answer(s) \n(Only Include Answer #)'];
+const esc = v => { v = String(v ?? ''); return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+
+function toCsv(questions, seconds) {
+  const t = Math.min(300, Math.max(1, Math.round(seconds) || 20));
+  const rows = [Array(8).fill(''), HEADER];
+  questions.forEach((q, i) => {
+    const a = q.choices.slice(0, 4).map(k => k.text);
+    while (a.length < 4) a.push('');
+    rows.push([i + 1, q.text, ...a, t, q.correct.filter(n => n <= 4).join(',')]);
+  });
+  return rows.map(r => r.map(esc).join(',')).join('\r\n') + '\r\n';
+}
+if (false && typeof module !== 'undefined') module.exports = { extractItems, parseItems, toCsv };
+
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const $=id=>document.getElementById(id);let Q=[],name='blooket';
+const drop=$('drop'),fi=$('f');
+drop.onclick=()=>fi.click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('h')};
+drop.ondragleave=()=>drop.classList.remove('h');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('h');go(e.dataTransfer.files[0])};
+fi.onchange=()=>go(fi.files[0]);
+async function go(file){
+  if(!file)return;name=file.name.replace(/\.pdf$/i,'');
+  drop.textContent='Reading '+file.name+'…';
+  try{
+    const items=await extractItems(pdfjsLib,new Uint8Array(await file.arrayBuffer()));
+    const r=parseItems(items);Q=r.questions;show(r);
+    drop.textContent='Loaded '+file.name+' — drop another to replace';
+  }catch(e){console.error(e);drop.textContent='Could not read that PDF ('+e.message+'). Is it a Blooket answer key?'}
+}
+function show(r){
+  $('res').hidden=$('pv').hidden=!Q.length;
+  $('st').innerHTML=Q.length?'<span class="ok">'+Q.length+' questions found</span>':'<span class="warn">No questions found</span>';
+  $('wn').innerHTML=r.warnings.map(w=>'<div class="warn">⚠ '+w+'</div>').join('');
+  $('dl').disabled=!Q.length;
+  const tb=$('tb');tb.textContent='';
+  Q.forEach(q=>{const tr=tb.insertRow();tr.insertCell().textContent=q.num;tr.insertCell().textContent=q.text;
+    for(let i=0;i<4;i++){const c=tr.insertCell(),k=q.choices[i];c.textContent=k?k.text:'';if(k&&k.correct)c.className='c'}});
+}
+$('dl').onclick=()=>{
+  const b=new Blob([toCsv(Q,+$('t').value)],{type:'text/csv'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name+'_blooket_import.csv';a.click();
+};
+</script></body></html>
